@@ -166,7 +166,6 @@ class Proxy(object):
 
     def _pyroRelease(self):
         """release the connection to the pyro daemon"""
-        self.__check_owner()
         if self._pyroConnection is not None:
             self._pyroConnection.close()
             self._pyroConnection = None
@@ -194,7 +193,6 @@ class Proxy(object):
 
     def _pyroInvoke(self, methodname, vargs, kwargs, flags=0, objectId=None):
         """perform the remote method call communication"""
-        self.__check_owner()
         core.current_context.response_annotations = {}
         if self._pyroConnection is None:
             self.__pyroCreateConnection()
@@ -326,7 +324,6 @@ class Proxy(object):
                     log.error(err)
                     raise errors.ProtocolError(err)
 
-        self.__check_owner()
         if self._pyroConnection is not None:
             return False  # already connected
         uri = core.resolve(self._pyroUri)
@@ -450,11 +447,6 @@ class Proxy(object):
         else:
             # replaces SerializedBlob argument with the data to be serialized
             return serializer.dumpsCall(objectId, methodname, blob._data, kwargs), flags
-
-    def __check_owner(self):
-        if get_ident() != self.__pyroOwnerThread:
-            raise errors.PyroError("the calling thread is not the owner of this proxy, "
-                                   "create a new proxy in this thread or transfer ownership.")
 
 
 class _RemoteMethod(object):

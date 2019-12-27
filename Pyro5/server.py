@@ -14,6 +14,8 @@ import threading
 import logging
 import inspect
 import warnings
+from functools import partial
+
 import serpent
 from . import config, core, errors, serializers, socketutil, protocol, client
 
@@ -152,13 +154,13 @@ class DaemonObject(object):
             core.DAEMON_NAME, self.daemon.locationStr, self.daemon.natLocationStr,
             len(self.daemon.objectsById), self.daemon.transportServer)
 
-    def get_metadata(self, objectId, as_lists=False):
+    def get_metadata(self, objectId, as_lists=False, only_exposed=True):
         """
         Get metadata for the given object (exposed methods, oneways, attributes).
         """
         obj = self.daemon.objectsById.get(objectId)
         if obj is not None:
-            metadata = get_exposed_members(obj, as_lists=as_lists)
+            metadata = get_exposed_members(obj, only_exposed=only_exposed, as_lists=as_lists)
             if not metadata["methods"] and not metadata["attrs"]:
                 # Something seems wrong: nothing is remotely exposed.
                 warnings.warn("Class %r doesn't expose any methods or attributes. Did you forget setting @expose on them?" % type(obj))
@@ -191,6 +193,8 @@ class Daemon(object):
     Pyro daemon. Contains server side logic and dispatches incoming remote method calls
     to the appropriate objects.
     """
+
+    only_exposed = True
 
     def __init__(self, host=None, port=0, unixsocket=None, nathost=None, natport=None, interface=DaemonObject, connected_socket=None):
         if connected_socket:
@@ -265,7 +269,7 @@ class Daemon(object):
         return self.transportServer.selector
 
     @staticmethod
-    def serveSimple(objects, host=None, port=0, daemon=None, ns=True, verbose=True):
+    def serveSimple(objects, host=None, port=0, daemon=None, ns=True, verbose=True, only_exposed=True):
         """
         Basic method to fire up a daemon (or supply one yourself).
         objects is a dict containing objects to register as keys, and
@@ -284,7 +288,7 @@ class Daemon(object):
                     localname = None  # name is used for the name server
                 else:
                     localname = name  # no name server, use name in daemon
-                uri = daemon.register(obj, localname)
+                uri = daemon.register(obj, localname, only_exposed=only_exposed)
                 if verbose:
                     print("Object {0}:\n    uri = {1}".format(repr(obj), uri))
                 if name and ns:
@@ -359,7 +363,8 @@ class Daemon(object):
             handshake_response = self.validateHandshake(conn, data["handshake"])
             handshake_response = {
                 "handshake": handshake_response,
-                "meta": self.objectsById[core.DAEMON_NAME].get_metadata(data["object"], as_lists=True)
+                "meta": self.objectsById[core.DAEMON_NAME].get_metadata(data["object"], as_lists=True,
+                                                                        only_exposed=self.only_exposed)
             }
             data = serializer.dumps(handshake_response)
             msgtype = protocol.MSG_CONNECTOK
@@ -454,7 +459,7 @@ class Daemon(object):
                     # batched method calls, loop over them all and collect all results
                     data = []
                     for method, vargs, kwargs in vargs:
-                        method = get_attribute(obj, method)
+                        method = get_attribute(obj, method, only_exposed=self.only_exposed)
                         try:
                             result = method(*vargs, **kwargs)  # this is the actual method call to the Pyro object
                         except Exception as xv:
@@ -469,12 +474,12 @@ class Daemon(object):
                     # normal single method call
                     if method == "__getattr__":
                         # special case for direct attribute access (only exposed @properties are accessible)
-                        data = get_exposed_property_value(obj, vargs[0])
+                        data = get_exposed_property_value(obj, vargs[0], only_exposed=self.only_exposed)
                     elif method == "__setattr__":
                         # special case for direct attribute access (only exposed @properties are accessible)
-                        data = set_exposed_property_value(obj, vargs[0], vargs[1])
+                        data = set_exposed_property_value(obj, vargs[0], vargs[1], only_exposed=self.only_exposed)
                     else:
-                        method = get_attribute(obj, method)
+                        method = get_attribute(obj, method, only_exposed=self.only_exposed)
                         if request_flags & protocol.FLAGS_ONEWAY:
                             # oneway call to be run inside its own thread, otherwise client blocking can still occur
                             #    on the next call on the same proxy
@@ -636,7 +641,7 @@ class Daemon(object):
             protocol.log_wiredata(log, "daemon wiredata sending (error response)", msg)
         connection.send(msg.data)
 
-    def register(self, obj_or_class, objectId=None, force=False):
+    def register(self, obj_or_class, objectId=None, force=False, only_exposed=True):
         """
         Register a Pyro object under the given id. Note that this object is now only
         known inside this daemon, it is not automatically available in a name server.
@@ -668,9 +673,11 @@ class Daemon(object):
         # we need to do this for all known serializers
         for ser in serializers.serializers.values():
             if inspect.isclass(obj_or_class):
-                ser.register_type_replacement(obj_or_class, pyro_obj_to_auto_proxy)
+                ser.register_type_replacement(obj_or_class,
+                                              partial(pyro_obj_to_auto_proxy, only_exposed=only_exposed))
             else:
-                ser.register_type_replacement(type(obj_or_class), pyro_obj_to_auto_proxy)
+                ser.register_type_replacement(type(obj_or_class),
+                                              partial(pyro_obj_to_auto_proxy, only_exposed=only_exposed))
         # register the object/class in the mapping
         self.objectsById[obj_or_class._pyroId] = obj_or_class
         return self.uriFor(objectId)
@@ -730,7 +737,7 @@ class Daemon(object):
             reset_exposed_members(registered_object, as_lists=True)
             reset_exposed_members(registered_object, as_lists=False)
 
-    def proxyFor(self, objectOrId, nat=True):
+    def proxyFor(self, objectOrId, nat=True, only_exposed=True):
         """
         Get a fully initialized Pyro Proxy for the given object (or object id) for this daemon.
         If nat is False, the configured NAT address (if any) is ignored.
@@ -743,7 +750,7 @@ class Daemon(object):
             registered_object = self.objectsById[uri.object]
         except KeyError:
             raise errors.DaemonError("object isn't registered in this daemon")
-        meta = get_exposed_members(registered_object)
+        meta = get_exposed_members(registered_object, only_exposed=only_exposed)
         proxy._pyroGetMetadata(known_metadata=meta)
         return proxy
 
@@ -825,16 +832,16 @@ serpent.register_class(Daemon, serializers.pyro_class_serpent_serializer)
 serializers.SerializerBase.register_class_to_dict(Daemon, serializers.serialize_pyro_object_to_dict, serpent_too=False)
 
 
-def pyro_obj_to_auto_proxy(obj):
+def pyro_obj_to_auto_proxy(obj, only_exposed=True):
     """reduce function that automatically replaces Pyro objects by a Proxy"""
     daemon = getattr(obj, "_pyroDaemon", None)
     if daemon:
         # only return a proxy if the object is a registered pyro object
-        return daemon.proxyFor(obj)
+        return daemon.proxyFor(obj, only_exposed=only_exposed)
     return obj
 
 
-def get_attribute(obj, attr):
+def get_attribute(obj, attr, only_exposed=True):
     """
     Resolves an attribute name to an object.  Raises
     an AttributeError if any attribute in the chain starts with a '``_``'.
@@ -843,11 +850,12 @@ def get_attribute(obj, attr):
     """
     if is_private_attribute(attr):
         raise AttributeError("attempt to access private attribute '%s'" % attr)
-    else:
-        obj = getattr(obj, attr)
+    obj = getattr(obj, attr)
     if getattr(obj, "_pyroExposed", False):
         return obj
-    raise AttributeError("attempt to access unexposed attribute '%s'" % attr)
+    if only_exposed:
+        raise AttributeError("attempt to access unexposed attribute '%s'" % attr)
+    return obj
 
 
 __exposed_member_cache = {}

@@ -444,7 +444,8 @@ class NameServer(object):
 class NameServerDaemon(server.Daemon):
     """Daemon that contains the Name Server."""
 
-    def __init__(self, host=None, port=None, unixsocket=None, nathost=None, natport=None, storage=None):
+    def __init__(self, host=None, port=None, unixsocket=None, nathost=None, natport=None, storage=None,
+                 only_exposed=True):
         if host is None:
             host = config.HOST
         elif not isinstance(host, str):
@@ -471,7 +472,7 @@ class NameServerDaemon(server.Daemon):
         if existing_count > 0:
             log.debug("number of existing entries in storage: %d", existing_count)
         super(NameServerDaemon, self).__init__(host, port, unixsocket, nathost=nathost, natport=natport)
-        self.register(self.nameserver, core.NAMESERVER_NAME)
+        self.register(self.nameserver, core.NAMESERVER_NAME, only_exposed=only_exposed)
         metadata = {"class:Pyro5.nameserver.NameServer"}
         self.nameserver.register(core.NAMESERVER_NAME, self.uriFor(self.nameserver), metadata=metadata)
         if config.NS_AUTOCLEAN > 0:
